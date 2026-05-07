@@ -11,6 +11,10 @@ import (
 
 func main() {
 	model := NewModel()
+	if cfg, err := LoadConfig(); err == nil {
+		model.SetCredentials(cfg.CredentialsPath)
+		model.SetOutputDir(cfg.OutputDir)
+	}
 	go func() {
 		w := new(app.Window)
 		w.Option(

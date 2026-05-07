@@ -28,6 +28,9 @@ type State struct {
 }
 
 func LoadState(outputDir string) (*State, error) {
+	if err := os.MkdirAll(outputDir, 0o755); err != nil {
+		return nil, err
+	}
 	s := &State{
 		Downloaded: make(map[string]StateEntry),
 		path:       filepath.Join(outputDir, stateFileName),

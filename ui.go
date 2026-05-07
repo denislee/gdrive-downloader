@@ -55,7 +55,9 @@ func newUI(w *app.Window, m *Model) *ui {
 	th.Shaper = text.NewShaper(text.WithCollection(gofont.Collection()))
 	u := &ui{w: w, model: m, th: th}
 	u.credEditor.SingleLine = true
+	u.credEditor.SetText(m.CredentialsPath)
 	u.outDirEditor.SingleLine = true
+	u.outDirEditor.SetText(m.OutputDir)
 	u.filesList.Axis = layout.Vertical
 	u.logList.Axis = layout.Vertical
 	return u
@@ -90,8 +92,15 @@ func (u *ui) layout(gtx layout.Context) layout.Dimensions {
 	paint.Fill(gtx.Ops, colorBg)
 
 	// Sync editor text into model so other goroutines see it.
-	u.model.SetCredentials(strings.TrimSpace(u.credEditor.Text()))
-	u.model.SetOutputDir(strings.TrimSpace(u.outDirEditor.Text()))
+	cred := strings.TrimSpace(u.credEditor.Text())
+	out := strings.TrimSpace(u.outDirEditor.Text())
+
+	snap := u.model.Snapshot()
+	if cred != snap.CredentialsPath || out != snap.OutputDir {
+		u.model.SetCredentials(cred)
+		u.model.SetOutputDir(out)
+		_ = SaveConfig(Config{CredentialsPath: cred, OutputDir: out})
+	}
 
 	// Click handling.
 	if u.signInBtn.Clicked(gtx) {
