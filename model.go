@@ -226,6 +226,18 @@ func (m *Model) RetryFailed() {
 	m.notify()
 }
 
+func (m *Model) FullReset() {
+	m.mu.Lock()
+	for _, f := range m.Files {
+		f.Status = StatusQueued
+		f.BytesGot = 0
+		f.Err = ""
+	}
+	m.recompute()
+	m.mu.Unlock()
+	m.notify()
+}
+
 func (m *Model) recompute() {
 	done, failed, skipped := 0, 0, 0
 	var bytes int64

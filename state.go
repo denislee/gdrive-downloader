@@ -69,6 +69,13 @@ func (s *State) Mark(id string, e StateEntry) {
 	s.mu.Unlock()
 }
 
+func (s *State) Clear() {
+	s.mu.Lock()
+	s.Downloaded = make(map[string]StateEntry)
+	s.dirty = true
+	s.mu.Unlock()
+}
+
 func (s *State) Get(id string) (StateEntry, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()

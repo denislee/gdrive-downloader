@@ -38,6 +38,7 @@ type ui struct {
 	startBtn  widget.Clickable
 	stopBtn   widget.Clickable
 	retryBtn  widget.Clickable
+	resetBtn  widget.Clickable
 	copyLogsBtn widget.Clickable
 
 	filesList widget.List
@@ -129,6 +130,9 @@ func (u *ui) layout(gtx layout.Context) layout.Dimensions {
 	if u.retryBtn.Clicked(gtx) {
 		u.model.RetryFailed()
 	}
+	if u.resetBtn.Clicked(gtx) {
+		u.handleReset()
+	}
 	if u.copyLogsBtn.Clicked(gtx) {
 		u.handleCopyLogs(gtx)
 	}
@@ -208,6 +212,8 @@ func (u *ui) actionsRow(gtx layout.Context) layout.Dimensions {
 		layout.Rigid(material.Button(u.th, &u.stopBtn, "Stop").Layout),
 		rigidSpacerW(8),
 		layout.Rigid(material.Button(u.th, &u.retryBtn, "Retry Failed").Layout),
+		rigidSpacerW(8),
+		layout.Rigid(material.Button(u.th, &u.resetBtn, "Reset Session").Layout),
 	)
 }
 
@@ -312,6 +318,19 @@ func (u *ui) handleCopyLogs(gtx layout.Context) {
 		Data: io.NopCloser(strings.NewReader(sb.String())),
 	})
 	u.model.Logf("Logs copied to clipboard")
+}
+
+func (u *ui) handleReset() {
+	u.mu.Lock()
+	dctx := u.dctx
+	u.mu.Unlock()
+	if dctx == nil || dctx.state == nil {
+		u.model.Logf("nothing to reset")
+		return
+	}
+	dctx.state.Clear()
+	u.model.FullReset()
+	u.model.Logf("session reset: status cleared, will re-verify all files")
 }
 
 func (u *ui) startSignIn() {

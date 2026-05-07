@@ -259,6 +259,31 @@ func (d *Driver) handleOne(ctx context.Context, outputDir string, f *FileItem) {
 		return
 	}
 
+	// If NOT in state, check if file already exists and matches.
+	// This handles the "Reset Session" case where we want to avoid re-downloading
+	// what we already have, or delete it if requested.
+	if _, err := os.Stat(dest); err == nil {
+		if err := d.verifyLocalFile(f, dest); err == nil {
+			snap := d.model.Snapshot()
+			if snap.DeleteAfterDownload {
+				d.model.Logf("RE-VERIFIED %s, deleting from Drive...", f.Name)
+				if err := d.svc.Files.Delete(f.ID).Do(); err != nil {
+					d.model.Logf("DELETE FAILED %s: %s", f.Name, err)
+				} else {
+					d.model.Logf("DELETED %s from Drive", f.Name)
+				}
+			}
+			d.markSkipped(f, "already exists and verified")
+			d.state.Mark(f.ID, StateEntry{
+				Path:         f.RelPath,
+				MD5:          f.MD5,
+				ModifiedTime: f.ModifiedTime,
+				Size:         f.Size,
+			})
+			return
+		}
+	}
+
 	d.model.UpdateFile(f.ID, func(fi *FileItem) {
 		fi.Status = StatusDownloading
 		fi.BytesGot = 0
@@ -300,9 +325,15 @@ func (d *Driver) handleOne(ctx context.Context, outputDir string, f *FileItem) {
 
 	snap := d.model.Snapshot()
 	if snap.DeleteAfterDownload {
-		if err := d.verifyAndDelete(f, dest); err != nil {
-			d.model.Logf("VERIFY/DELETE FAILED %s: %s", f.Name, err)
-			// We don't mark as failed because the download itself was successful.
+		if err := d.verifyLocalFile(f, dest); err != nil {
+			d.model.Logf("VERIFY FAILED %s: %s", f.Name, err)
+		} else {
+			d.model.Logf("VERIFIED %s, deleting from Drive...", f.Name)
+			if err := d.svc.Files.Delete(f.ID).Do(); err != nil {
+				d.model.Logf("DELETE FAILED %s: %s", f.Name, err)
+			} else {
+				d.model.Logf("DELETED %s from Drive", f.Name)
+			}
 		}
 	}
 
@@ -317,7 +348,7 @@ func (d *Driver) handleOne(ctx context.Context, outputDir string, f *FileItem) {
 	})
 }
 
-func (d *Driver) verifyAndDelete(f *FileItem, localPath string) error {
+func (d *Driver) verifyLocalFile(f *FileItem, localPath string) error {
 	// Verify size.
 	st, err := os.Stat(localPath)
 	if err != nil {
@@ -343,13 +374,6 @@ func (d *Driver) verifyAndDelete(f *FileItem, localPath string) error {
 			return fmt.Errorf("MD5 mismatch: drive %s, local %s", f.MD5, localMD5)
 		}
 	}
-
-	// Delete from Google Drive.
-	d.model.Logf("VERIFIED %s, deleting from Drive...", f.Name)
-	if err := d.svc.Files.Delete(f.ID).Do(); err != nil {
-		return fmt.Errorf("delete: %w", err)
-	}
-	d.model.Logf("DELETED %s from Drive", f.Name)
 	return nil
 }
 
