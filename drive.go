@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -91,11 +92,33 @@ func (d *Driver) Scan(ctx context.Context) ([]*FileItem, error) {
 		pageToken = resp.NextPageToken
 	}
 
+	// Sort for deterministic collision handling.
+	sort.Slice(all, func(i, j int) bool { return all[i].ID < all[j].ID })
+
 	// Build folder index.
 	folders := map[string]raw{}
 	for _, r := range all {
 		if r.MimeType == folderMime {
 			folders[r.ID] = r
+		}
+	}
+
+	usedPaths := make(map[string]bool)
+	makeUnique := func(dir, name string) string {
+		rel := filepath.Join(dir, name)
+		if !usedPaths[rel] {
+			usedPaths[rel] = true
+			return rel
+		}
+		ext := filepath.Ext(name)
+		stem := strings.TrimSuffix(name, ext)
+		for i := 1; ; i++ {
+			newName := fmt.Sprintf("%s (%d)%s", stem, i, ext)
+			rel = filepath.Join(dir, newName)
+			if !usedPaths[rel] {
+				usedPaths[rel] = true
+				return rel
+			}
 		}
 	}
 
@@ -117,7 +140,7 @@ func (d *Driver) Scan(ctx context.Context) ([]*FileItem, error) {
 		if len(f.Parents) > 0 {
 			parent = pathOf(f.Parents[0])
 		}
-		p := filepath.Join(parent, sanitize(f.Name))
+		p := makeUnique(parent, sanitize(f.Name))
 		pathCache[id] = p
 		return p
 	}
@@ -135,7 +158,6 @@ func (d *Driver) Scan(ctx context.Context) ([]*FileItem, error) {
 			dir = pathOf(r.Parents[0])
 		}
 		name := sanitize(r.Name)
-		var rel string
 		var isExport bool
 		var ext string
 		if exp, ok := exportTable[r.MimeType]; ok {
@@ -149,7 +171,7 @@ func (d *Driver) Scan(ctx context.Context) ([]*FileItem, error) {
 			d.model.Logf("skipping %s (unsupported Google type %s)", r.Name, r.MimeType)
 			continue
 		}
-		rel = filepath.Join(dir, name)
+		rel := makeUnique(dir, name)
 		items = append(items, &FileItem{
 			ID:           r.ID,
 			Name:         r.Name,
