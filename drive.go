@@ -1,0 +1,380 @@
+package main
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"io"
+	"net/http"
+	"os"
+	"path/filepath"
+	"runtime"
+	"strings"
+	"sync"
+	"time"
+
+	"google.golang.org/api/drive/v3"
+	"google.golang.org/api/googleapi"
+	"google.golang.org/api/option"
+)
+
+const folderMime = "application/vnd.google-apps.folder"
+
+// exportTable maps Google-native MIME types to the export MIME + file extension.
+var exportTable = map[string]struct {
+	Mime string
+	Ext  string
+}{
+	"application/vnd.google-apps.document":     {"application/vnd.openxmlformats-officedocument.wordprocessingml.document", ".docx"},
+	"application/vnd.google-apps.spreadsheet":  {"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", ".xlsx"},
+	"application/vnd.google-apps.presentation": {"application/vnd.openxmlformats-officedocument.presentationml.presentation", ".pptx"},
+	"application/vnd.google-apps.drawing":      {"image/png", ".png"},
+	"application/vnd.google-apps.script":       {"application/vnd.google-apps.script+json", ".json"},
+}
+
+type Driver struct {
+	svc   *drive.Service
+	model *Model
+	state *State
+}
+
+func NewDriver(ctx context.Context, client *http.Client, model *Model, state *State) (*Driver, error) {
+	svc, err := drive.NewService(ctx, option.WithHTTPClient(client))
+	if err != nil {
+		return nil, err
+	}
+	return &Driver{svc: svc, model: model, state: state}, nil
+}
+
+// Scan lists all non-trashed files and folders in My Drive (corpora=user) and
+// builds the FileItem list with mirrored relative paths.
+func (d *Driver) Scan(ctx context.Context) ([]*FileItem, error) {
+	type raw struct {
+		ID        string
+		Name      string
+		MimeType  string
+		Size      int64
+		Parents   []string
+		MD5       string
+		Modified  string
+		Shortcut  *drive.FileShortcutDetails
+	}
+
+	var all []raw
+	pageToken := ""
+	for {
+		call := d.svc.Files.List().
+			Context(ctx).
+			Corpora("user").
+			IncludeItemsFromAllDrives(false).
+			SupportsAllDrives(false).
+			PageSize(1000).
+			Q("trashed = false").
+			Fields("nextPageToken, files(id, name, mimeType, size, parents, md5Checksum, modifiedTime, shortcutDetails)")
+		if pageToken != "" {
+			call = call.PageToken(pageToken)
+		}
+		resp, err := call.Do()
+		if err != nil {
+			return nil, fmt.Errorf("list files: %w", err)
+		}
+		for _, f := range resp.Files {
+			all = append(all, raw{
+				ID: f.Id, Name: f.Name, MimeType: f.MimeType, Size: f.Size,
+				Parents: f.Parents, MD5: f.Md5Checksum, Modified: f.ModifiedTime,
+				Shortcut: f.ShortcutDetails,
+			})
+		}
+		if resp.NextPageToken == "" {
+			break
+		}
+		pageToken = resp.NextPageToken
+	}
+
+	// Build folder index.
+	folders := map[string]raw{}
+	for _, r := range all {
+		if r.MimeType == folderMime {
+			folders[r.ID] = r
+		}
+	}
+
+	pathCache := map[string]string{}
+	var pathOf func(id string) string
+	pathOf = func(id string) string {
+		if id == "" {
+			return ""
+		}
+		if v, ok := pathCache[id]; ok {
+			return v
+		}
+		f, ok := folders[id]
+		if !ok {
+			pathCache[id] = ""
+			return ""
+		}
+		var parent string
+		if len(f.Parents) > 0 {
+			parent = pathOf(f.Parents[0])
+		}
+		p := filepath.Join(parent, sanitize(f.Name))
+		pathCache[id] = p
+		return p
+	}
+
+	var items []*FileItem
+	for _, r := range all {
+		if r.MimeType == folderMime {
+			continue
+		}
+		if r.MimeType == "application/vnd.google-apps.shortcut" {
+			continue
+		}
+		var dir string
+		if len(r.Parents) > 0 {
+			dir = pathOf(r.Parents[0])
+		}
+		name := sanitize(r.Name)
+		var rel string
+		var isExport bool
+		var ext string
+		if exp, ok := exportTable[r.MimeType]; ok {
+			isExport = true
+			ext = exp.Ext
+			if !strings.HasSuffix(strings.ToLower(name), ext) {
+				name += ext
+			}
+		} else if strings.HasPrefix(r.MimeType, "application/vnd.google-apps.") {
+			// Unsupported native type — skip with log.
+			d.model.Logf("skipping %s (unsupported Google type %s)", r.Name, r.MimeType)
+			continue
+		}
+		rel = filepath.Join(dir, name)
+		items = append(items, &FileItem{
+			ID:           r.ID,
+			Name:         r.Name,
+			MimeType:     r.MimeType,
+			Size:         r.Size,
+			RelPath:      rel,
+			MD5:          r.MD5,
+			ModifiedTime: r.Modified,
+			IsExport:     isExport,
+			ExportExt:    ext,
+			Status:       StatusQueued,
+		})
+	}
+	return items, nil
+}
+
+// Run starts the worker pool and downloads all queued files. It returns when
+// either ctx is cancelled or every file has reached a terminal status.
+func (d *Driver) Run(ctx context.Context, outputDir string) {
+	workers := runtime.NumCPU()
+	if workers > 6 {
+		workers = 6
+	}
+	if workers < 2 {
+		workers = 2
+	}
+
+	jobs := make(chan *FileItem)
+	var wg sync.WaitGroup
+
+	for i := 0; i < workers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for f := range jobs {
+				d.handleOne(ctx, outputDir, f)
+			}
+		}()
+	}
+
+	snap := d.model.Snapshot()
+	files := snap.Files
+	go func() {
+		defer close(jobs)
+		for i := range files {
+			id := files[i].ID
+			d.model.mu.RLock()
+			fi := d.model.byID[id]
+			d.model.mu.RUnlock()
+			if fi == nil {
+				continue
+			}
+			select {
+			case <-ctx.Done():
+				return
+			case jobs <- fi:
+			}
+		}
+	}()
+	wg.Wait()
+}
+
+func (d *Driver) handleOne(ctx context.Context, outputDir string, f *FileItem) {
+	if ctx.Err() != nil {
+		return
+	}
+
+	// Resume: skip if state matches.
+	if e, ok := d.state.Get(f.ID); ok {
+		if e.MD5 != "" && f.MD5 != "" && e.MD5 == f.MD5 {
+			d.markSkipped(f, "already downloaded")
+			return
+		}
+		if e.MD5 == "" && e.ModifiedTime == f.ModifiedTime && e.ModifiedTime != "" {
+			d.markSkipped(f, "already exported")
+			return
+		}
+	}
+
+	dest := filepath.Join(outputDir, f.RelPath)
+	if err := os.MkdirAll(filepath.Dir(dest), 0o755); err != nil {
+		d.markFailed(f, err)
+		return
+	}
+
+	d.model.UpdateFile(f.ID, func(fi *FileItem) {
+		fi.Status = StatusDownloading
+		fi.BytesGot = 0
+		fi.Err = ""
+	})
+
+	tmp := dest + ".part"
+	out, err := os.Create(tmp)
+	if err != nil {
+		d.markFailed(f, err)
+		return
+	}
+	defer func() { _ = os.Remove(tmp) }()
+
+	body, err := d.openBody(ctx, f)
+	if err != nil {
+		_ = out.Close()
+		d.markFailed(f, err)
+		return
+	}
+	cw := &countingWriter{w: out, onWrite: func(n int) {
+		d.model.UpdateFile(f.ID, func(fi *FileItem) { fi.BytesGot += int64(n) })
+	}}
+	_, copyErr := io.Copy(cw, body)
+	_ = body.Close()
+	closeErr := out.Close()
+	if copyErr != nil {
+		d.markFailed(f, copyErr)
+		return
+	}
+	if closeErr != nil {
+		d.markFailed(f, closeErr)
+		return
+	}
+	if err := os.Rename(tmp, dest); err != nil {
+		d.markFailed(f, err)
+		return
+	}
+
+	d.state.Mark(f.ID, StateEntry{
+		Path:         f.RelPath,
+		MD5:          f.MD5,
+		ModifiedTime: f.ModifiedTime,
+		Size:         f.Size,
+	})
+	d.model.UpdateFile(f.ID, func(fi *FileItem) {
+		fi.Status = StatusDone
+	})
+}
+
+func (d *Driver) openBody(ctx context.Context, f *FileItem) (io.ReadCloser, error) {
+	const maxAttempts = 5
+	var lastErr error
+	for attempt := 0; attempt < maxAttempts; attempt++ {
+		if attempt > 0 {
+			delay := time.Duration(1<<uint(attempt)) * time.Second
+			select {
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			case <-time.After(delay):
+			}
+		}
+		var resp *http.Response
+		var err error
+		if f.IsExport {
+			exp := exportTable[f.MimeType]
+			resp, err = d.svc.Files.Export(f.ID, exp.Mime).Context(ctx).Download()
+		} else {
+			resp, err = d.svc.Files.Get(f.ID).Context(ctx).Download()
+		}
+		if err == nil {
+			return resp.Body, nil
+		}
+		lastErr = err
+		if !shouldRetry(err) {
+			return nil, err
+		}
+	}
+	return nil, fmt.Errorf("after retries: %w", lastErr)
+}
+
+func shouldRetry(err error) bool {
+	var ge *googleapi.Error
+	if errors.As(err, &ge) {
+		if ge.Code == 429 || (ge.Code >= 500 && ge.Code < 600) {
+			return true
+		}
+		return false
+	}
+	return true
+}
+
+func (d *Driver) markFailed(f *FileItem, err error) {
+	msg := err.Error()
+	d.model.UpdateFile(f.ID, func(fi *FileItem) {
+		fi.Status = StatusFailed
+		fi.Err = msg
+	})
+	d.model.Logf("FAIL %s: %s", f.Name, msg)
+}
+
+func (d *Driver) markSkipped(f *FileItem, reason string) {
+	d.model.UpdateFile(f.ID, func(fi *FileItem) {
+		fi.Status = StatusSkipped
+	})
+	_ = reason
+}
+
+type countingWriter struct {
+	w       io.Writer
+	onWrite func(n int)
+}
+
+func (c *countingWriter) Write(p []byte) (int, error) {
+	n, err := c.w.Write(p)
+	if n > 0 && c.onWrite != nil {
+		c.onWrite(n)
+	}
+	return n, err
+}
+
+// sanitize replaces filesystem-unfriendly characters in a Drive item name.
+func sanitize(name string) string {
+	if name == "" {
+		return "untitled"
+	}
+	bad := []rune{'/', '\\', ':', '*', '?', '"', '<', '>', '|', '\x00'}
+	out := []rune(name)
+	for i, r := range out {
+		for _, b := range bad {
+			if r == b {
+				out[i] = '_'
+				break
+			}
+		}
+	}
+	s := strings.TrimSpace(string(out))
+	s = strings.Trim(s, ".")
+	if s == "" {
+		return "untitled"
+	}
+	return s
+}
