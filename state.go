@@ -21,10 +21,18 @@ type StateEntry struct {
 
 type State struct {
 	Downloaded map[string]StateEntry `json:"downloaded"`
+	Files      []*FileItem           `json:"files,omitempty"`
 
 	path  string
 	mu    sync.Mutex
 	dirty bool
+}
+
+func (s *State) SetFiles(files []*FileItem) {
+	s.mu.Lock()
+	s.Files = files
+	s.dirty = true
+	s.mu.Unlock()
 }
 
 func LoadState(outputDir string) (*State, error) {

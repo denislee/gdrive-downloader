@@ -33,19 +33,19 @@ func (s FileStatus) String() string {
 }
 
 type FileItem struct {
-	ID           string
-	Name         string
-	MimeType     string
-	Size         int64
-	RelPath      string
-	MD5          string
-	ModifiedTime string
-	IsExport     bool
-	ExportExt    string
+	ID           string `json:"id"`
+	Name         string `json:"name"`
+	MimeType     string `json:"mimeType"`
+	Size         int64  `json:"size"`
+	RelPath      string `json:"relPath"`
+	MD5          string `json:"md5"`
+	ModifiedTime string `json:"modifiedTime"`
+	IsExport     bool   `json:"isExport"`
+	ExportExt    string `json:"exportExt"`
 
-	Status   FileStatus
-	BytesGot int64
-	Err      string
+	Status   FileStatus `json:"status"`
+	BytesGot int64      `json:"bytesGot"`
+	Err      string     `json:"err"`
 }
 
 type Phase int

@@ -242,33 +242,33 @@ func (d *Driver) handleOne(ctx context.Context, outputDir string, f *FileItem) {
 	})
 
 	tmp := dest + ".part"
-	out, err := os.Create(tmp)
-	if err != nil {
-		d.markFailed(f, err)
-		return
+	var offset int64
+	if !f.IsExport {
+		if st, err := os.Stat(tmp); err == nil {
+			offset = st.Size()
+		}
 	}
-	defer func() { _ = os.Remove(tmp) }()
 
-	body, err := d.openBody(ctx, f)
-	if err != nil {
-		_ = out.Close()
-		d.markFailed(f, err)
-		return
+	// Use parallel download for new large files.
+	// We only do this for new files (offset == 0) to avoid complex hole-tracking logic.
+	if offset == 0 && f.Size > 20*1024*1024 && !f.IsExport {
+		if err := d.downloadParallel(ctx, f, tmp); err != nil {
+			_ = os.Remove(tmp)
+			d.markFailed(f, err)
+			return
+		}
+	} else {
+		if err := d.downloadSequential(ctx, f, tmp, offset); err != nil {
+			// Don't remove tmp if it was a partial download we can resume later,
+			// unless it's an export (which we can't resume).
+			if f.IsExport {
+				_ = os.Remove(tmp)
+			}
+			d.markFailed(f, err)
+			return
+		}
 	}
-	cw := &countingWriter{w: out, onWrite: func(n int) {
-		d.model.UpdateFile(f.ID, func(fi *FileItem) { fi.BytesGot += int64(n) })
-	}}
-	_, copyErr := io.Copy(cw, body)
-	_ = body.Close()
-	closeErr := out.Close()
-	if copyErr != nil {
-		d.markFailed(f, copyErr)
-		return
-	}
-	if closeErr != nil {
-		d.markFailed(f, closeErr)
-		return
-	}
+
 	if err := os.Rename(tmp, dest); err != nil {
 		d.markFailed(f, err)
 		return
@@ -285,7 +285,132 @@ func (d *Driver) handleOne(ctx context.Context, outputDir string, f *FileItem) {
 	})
 }
 
-func (d *Driver) openBody(ctx context.Context, f *FileItem) (io.ReadCloser, error) {
+func (d *Driver) downloadSequential(ctx context.Context, f *FileItem, tmp string, offset int64) error {
+	var out *os.File
+	if offset > 0 {
+		var err error
+		out, err = os.OpenFile(tmp, os.O_APPEND|os.O_WRONLY, 0o644)
+		if err != nil {
+			return err
+		}
+		d.model.UpdateFile(f.ID, func(fi *FileItem) { fi.BytesGot = offset })
+	} else {
+		var err error
+		out, err = os.Create(tmp)
+		if err != nil {
+			return err
+		}
+	}
+	defer out.Close()
+
+	body, err := d.openBody(ctx, f, offset, 0)
+	if err != nil {
+		return err
+	}
+	defer body.Close()
+
+	cw := &countingWriter{w: out, onWrite: func(n int) {
+		d.model.UpdateFile(f.ID, func(fi *FileItem) { fi.BytesGot += int64(n) })
+	}}
+	_, err = io.Copy(cw, body)
+	return err
+}
+
+func (d *Driver) downloadParallel(ctx context.Context, f *FileItem, tmp string) error {
+	const chunkSize = 8 * 1024 * 1024 // 8MB
+	const maxParallel = 4
+
+	out, err := os.OpenFile(tmp, os.O_CREATE|os.O_RDWR, 0o644)
+	if err != nil {
+		return err
+	}
+	defer out.Close()
+	if err := out.Truncate(f.Size); err != nil {
+		return err
+	}
+
+	type chunk struct {
+		start, end int64
+	}
+	chunks := make(chan chunk)
+	go func() {
+		defer close(chunks)
+		for start := int64(0); start < f.Size; start += chunkSize {
+			end := start + chunkSize - 1
+			if end >= f.Size {
+				end = f.Size - 1
+			}
+			select {
+			case <-ctx.Done():
+				return
+			case chunks <- chunk{start, end}:
+			}
+		}
+	}()
+
+	errCh := make(chan error, 1)
+	var wg sync.WaitGroup
+	for i := 0; i < maxParallel; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			buf := make([]byte, 32*1024)
+			for c := range chunks {
+				if ctx.Err() != nil {
+					return
+				}
+				body, err := d.openBody(ctx, f, c.start, c.end)
+				if err != nil {
+					select {
+					case errCh <- err:
+					default:
+					}
+					return
+				}
+
+				curr := c.start
+				for {
+					n, rerr := body.Read(buf)
+					if n > 0 {
+						if _, werr := out.WriteAt(buf[:n], curr); werr != nil {
+							_ = body.Close()
+							select {
+							case errCh <- werr:
+							default:
+							}
+							return
+						}
+						curr += int64(n)
+						d.model.UpdateFile(f.ID, func(fi *FileItem) { fi.BytesGot += int64(n) })
+					}
+					if rerr != nil {
+						_ = body.Close()
+						if rerr != io.EOF {
+							select {
+							case errCh <- rerr:
+							default:
+							}
+						}
+						break
+					}
+					if ctx.Err() != nil {
+						_ = body.Close()
+						return
+					}
+				}
+			}
+		}()
+	}
+	wg.Wait()
+	select {
+	case err := <-errCh:
+		return err
+	default:
+		return ctx.Err()
+	}
+}
+
+func (d *Driver) openBody(ctx context.Context, f *FileItem, start, end int64) (io.ReadCloser, error) {
 	const maxAttempts = 5
 	var lastErr error
 	for attempt := 0; attempt < maxAttempts; attempt++ {
@@ -300,10 +425,19 @@ func (d *Driver) openBody(ctx context.Context, f *FileItem) (io.ReadCloser, erro
 		var resp *http.Response
 		var err error
 		if f.IsExport {
+			// Exports don't support Range.
 			exp := exportTable[f.MimeType]
 			resp, err = d.svc.Files.Export(f.ID, exp.Mime).Context(ctx).Download()
 		} else {
-			resp, err = d.svc.Files.Get(f.ID).Context(ctx).Download()
+			call := d.svc.Files.Get(f.ID)
+			if start > 0 || end > 0 {
+				rangeHeader := fmt.Sprintf("bytes=%d-", start)
+				if end > 0 {
+					rangeHeader = fmt.Sprintf("bytes=%d-%d", start, end)
+				}
+				call.Header().Set("Range", rangeHeader)
+			}
+			resp, err = call.Context(ctx).Download()
 		}
 		if err == nil {
 			return resp.Body, nil

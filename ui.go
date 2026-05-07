@@ -284,13 +284,19 @@ func (u *ui) startSignIn() {
 		u.model.SetPhase(PhaseIdle, "signed in as "+email)
 		u.model.Logf("signed in as %s", email)
 
-		driver, err := NewDriver(ctx, client, u.model, nil)
+		state, _ := LoadState(snap.OutputDir)
+		if state != nil && len(state.Files) > 0 {
+			u.model.ResetFiles(state.Files)
+			u.model.Logf("restored %d files from previous session", len(state.Files))
+		}
+
+		driver, err := NewDriver(ctx, client, u.model, state)
 		if err != nil {
 			u.model.Logf("driver: %s", err)
 			return
 		}
 		u.mu.Lock()
-		u.dctx = &driveContext{driver: driver}
+		u.dctx = &driveContext{driver: driver, state: state}
 		u.mu.Unlock()
 	}()
 }
@@ -326,6 +332,11 @@ func (u *ui) startScan() {
 			return
 		}
 		u.model.ResetFiles(items)
+		u.mu.Lock()
+		if u.dctx != nil {
+			u.dctx.state.SetFiles(items)
+		}
+		u.mu.Unlock()
 		u.model.SetPhase(PhaseIdle, fmt.Sprintf("scanned %d files", len(items)))
 		u.model.Logf("scan complete: %d files", len(items))
 	}()
@@ -348,13 +359,18 @@ func (u *ui) startDownload() {
 		u.model.Logf("scan Drive first")
 		return
 	}
-	state, err := LoadState(snap.OutputDir)
-	if err != nil {
-		u.model.Logf("state: %s", err)
-		return
+
+	state := dctx.state
+	if state == nil {
+		var err error
+		state, err = LoadState(snap.OutputDir)
+		if err != nil {
+			u.model.Logf("state: %s", err)
+			return
+		}
+		dctx.state = state
+		dctx.driver.state = state
 	}
-	dctx.state = state
-	dctx.driver.state = state
 
 	dlCtx, cancel := context.WithCancel(u.rootCtx)
 	u.mu.Lock()
@@ -376,7 +392,7 @@ func (u *ui) startDownload() {
 		if dlCtx.Err() != nil {
 			u.model.SetPhase(PhaseIdle, fmt.Sprintf("stopped (%d/%d done)", final.Done, final.Total))
 		} else {
-			u.model.SetPhase(PhaseDone, fmt.Sprintf("done: %d ok, %d skipped, %d failed", final.Done, final.Skipped, final.Failed))
+			u.model.SetPhase(PhaseDone, fmt.Sprintf("done: %d ok, %d skipped, %d failed", final.Done, final.Total-final.Done))
 		}
 	}()
 }
