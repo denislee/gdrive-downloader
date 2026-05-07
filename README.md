@@ -3,7 +3,8 @@
 Desktop GUI app (Go + [Gio](https://gioui.org)) that downloads every file from
 your Google Drive into a local folder, mirroring the Drive folder structure.
 
-- Read-only OAuth scope (`drive.readonly`) — nothing in your Drive is modified.
+- OAuth scope (`drive`) — used to scan your files and optionally delete them from Drive after a verified download.
+- Supports downloading files flagged by Google as malware/spam (acknowledges risk).
 - Google-native files are exported to Office formats:
   Docs → `.docx`, Sheets → `.xlsx`, Slides → `.pptx`, Drawings → `.png`,
   Apps Script → `.json`.

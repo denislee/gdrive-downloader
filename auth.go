@@ -94,7 +94,7 @@ func loadOAuthConfig(credentialsPath string) (*oauth2.Config, error) {
 	if err != nil {
 		return nil, fmt.Errorf("read credentials: %w", err)
 	}
-	cfg, err := google.ConfigFromJSON(b, drive.DriveReadonlyScope, "https://www.googleapis.com/auth/userinfo.email")
+	cfg, err := google.ConfigFromJSON(b, drive.DriveScope, "https://www.googleapis.com/auth/userinfo.email")
 	if err != nil {
 		return nil, fmt.Errorf("parse credentials.json: %w", err)
 	}

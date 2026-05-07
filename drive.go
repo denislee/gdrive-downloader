@@ -264,11 +264,14 @@ func (d *Driver) handleOne(ctx context.Context, outputDir string, f *FileItem) {
 	// what we already have, or delete it if requested.
 	if _, err := os.Stat(dest); err == nil {
 		if err := d.verifyLocalFile(f, dest); err == nil {
-			snap := d.model.Snapshot()
-			if snap.DeleteAfterDownload {
+			if d.model.IsDeleteAfterDownload() {
 				d.model.Logf("RE-VERIFIED %s, deleting from Drive...", f.Name)
-				if err := d.svc.Files.Delete(f.ID).Do(); err != nil {
-					d.model.Logf("DELETE FAILED %s: %s", f.Name, err)
+				if err := d.svc.Files.Delete(f.ID).Context(ctx).Do(); err != nil {
+					if isInsufficientScope(err) {
+						d.model.Logf("DELETE FAILED %s: insufficient permissions. Please click 'Forget' and 'Sign in' again to refresh scopes.", f.Name)
+					} else {
+						d.model.Logf("DELETE FAILED %s: %s", f.Name, err)
+					}
 				} else {
 					d.model.Logf("DELETED %s from Drive", f.Name)
 				}
@@ -323,14 +326,17 @@ func (d *Driver) handleOne(ctx context.Context, outputDir string, f *FileItem) {
 		return
 	}
 
-	snap := d.model.Snapshot()
-	if snap.DeleteAfterDownload {
+	if d.model.IsDeleteAfterDownload() {
 		if err := d.verifyLocalFile(f, dest); err != nil {
 			d.model.Logf("VERIFY FAILED %s: %s", f.Name, err)
 		} else {
 			d.model.Logf("VERIFIED %s, deleting from Drive...", f.Name)
-			if err := d.svc.Files.Delete(f.ID).Do(); err != nil {
-				d.model.Logf("DELETE FAILED %s: %s", f.Name, err)
+			if err := d.svc.Files.Delete(f.ID).Context(ctx).Do(); err != nil {
+				if isInsufficientScope(err) {
+					d.model.Logf("DELETE FAILED %s: insufficient permissions. Please click 'Forget' and 'Sign in' again to refresh scopes.", f.Name)
+				} else {
+					d.model.Logf("DELETE FAILED %s: %s", f.Name, err)
+				}
 			} else {
 				d.model.Logf("DELETED %s from Drive", f.Name)
 			}
@@ -521,7 +527,7 @@ func (d *Driver) openBody(ctx context.Context, f *FileItem, start, end int64) (i
 			exp := exportTable[f.MimeType]
 			resp, err = d.svc.Files.Export(f.ID, exp.Mime).Context(ctx).Download()
 		} else {
-			call := d.svc.Files.Get(f.ID)
+			call := d.svc.Files.Get(f.ID).AcknowledgeAbuse(true)
 			if start > 0 || end > 0 {
 				rangeHeader := fmt.Sprintf("bytes=%d-", start)
 				if end > 0 {
@@ -555,11 +561,22 @@ func shouldRetry(err error) bool {
 
 func (d *Driver) markFailed(f *FileItem, err error) {
 	msg := err.Error()
+	if strings.Contains(msg, "cannotDownloadFile") {
+		msg = "File restricted by owner or requires export (try exporting if it is a Google Doc)"
+	}
 	d.model.UpdateFile(f.ID, func(fi *FileItem) {
 		fi.Status = StatusFailed
 		fi.Err = msg
 	})
 	d.model.Logf("FAIL %s: %s", f.Name, msg)
+}
+
+func isInsufficientScope(err error) bool {
+	var ge *googleapi.Error
+	if errors.As(err, &ge) {
+		return ge.Code == 403 && (strings.Contains(ge.Message, "insufficient permissions") || strings.Contains(ge.Error(), "ACCESS_TOKEN_SCOPE_INSUFFICIENT"))
+	}
+	return false
 }
 
 func (d *Driver) markSkipped(f *FileItem, reason string) {

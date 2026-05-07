@@ -187,6 +187,12 @@ func (m *Model) SetDeleteAfterDownload(b bool) {
 	m.notify()
 }
 
+func (m *Model) IsDeleteAfterDownload() bool {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	return m.DeleteAfterDownload
+}
+
 func (m *Model) ResetFiles(files []*FileItem) {
 	m.mu.Lock()
 	m.Files = files
