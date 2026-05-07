@@ -36,6 +36,7 @@ type ui struct {
 	scanBtn   widget.Clickable
 	startBtn  widget.Clickable
 	stopBtn   widget.Clickable
+	retryBtn  widget.Clickable
 	copyLogsBtn widget.Clickable
 
 	filesList widget.List
@@ -121,6 +122,9 @@ func (u *ui) layout(gtx layout.Context) layout.Dimensions {
 	if u.stopBtn.Clicked(gtx) {
 		u.stopDownload()
 	}
+	if u.retryBtn.Clicked(gtx) {
+		u.model.RetryFailed()
+	}
 	if u.copyLogsBtn.Clicked(gtx) {
 		u.handleCopyLogs(gtx)
 	}
@@ -196,6 +200,8 @@ func (u *ui) actionsRow(gtx layout.Context) layout.Dimensions {
 		layout.Rigid(material.Button(u.th, &u.startBtn, "Start download").Layout),
 		rigidSpacerW(8),
 		layout.Rigid(material.Button(u.th, &u.stopBtn, "Stop").Layout),
+		rigidSpacerW(8),
+		layout.Rigid(material.Button(u.th, &u.retryBtn, "Retry Failed").Layout),
 	)
 }
 

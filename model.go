@@ -205,6 +205,19 @@ func (m *Model) UpdateFile(id string, fn func(*FileItem)) {
 	m.notify()
 }
 
+func (m *Model) RetryFailed() {
+	m.mu.Lock()
+	for _, f := range m.Files {
+		if f.Status == StatusFailed {
+			f.Status = StatusQueued
+			f.Err = ""
+		}
+	}
+	m.recompute()
+	m.mu.Unlock()
+	m.notify()
+}
+
 func (m *Model) recompute() {
 	done, failed, skipped := 0, 0, 0
 	var bytes int64
