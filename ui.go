@@ -5,12 +5,14 @@ import (
 	"fmt"
 	"image"
 	"image/color"
+	"io"
 	"strings"
 	"sync"
 	"time"
 
 	"gioui.org/app"
 	"gioui.org/font/gofont"
+	"gioui.org/io/clipboard"
 	"gioui.org/layout"
 	"gioui.org/op"
 	"gioui.org/op/clip"
@@ -34,6 +36,7 @@ type ui struct {
 	scanBtn   widget.Clickable
 	startBtn  widget.Clickable
 	stopBtn   widget.Clickable
+	copyLogsBtn widget.Clickable
 
 	filesList widget.List
 	logList   widget.List
@@ -117,6 +120,9 @@ func (u *ui) layout(gtx layout.Context) layout.Dimensions {
 	}
 	if u.stopBtn.Clicked(gtx) {
 		u.stopDownload()
+	}
+	if u.copyLogsBtn.Clicked(gtx) {
+		u.handleCopyLogs(gtx)
 	}
 
 	return layout.UniformInset(unit.Dp(12)).Layout(gtx, func(gtx layout.Context) layout.Dimensions {
@@ -247,7 +253,17 @@ func (u *ui) logPanel(gtx layout.Context) layout.Dimensions {
 	logs := u.model.Logs()
 	return panel(gtx, func(gtx layout.Context) layout.Dimensions {
 		return layout.Flex{Axis: layout.Vertical}.Layout(gtx,
-			layout.Rigid(material.Body1(u.th, "Log").Layout),
+			layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+				return layout.Flex{Axis: layout.Horizontal, Alignment: layout.Middle}.Layout(gtx,
+					layout.Flexed(1, material.Body1(u.th, "Log").Layout),
+					layout.Rigid(func(gtx layout.Context) layout.Dimensions {
+						btn := material.Button(u.th, &u.copyLogsBtn, "Copy Logs")
+						btn.Inset = layout.Inset{Top: 2, Bottom: 2, Left: 4, Right: 4}
+						btn.TextSize = unit.Sp(12)
+						return btn.Layout(gtx)
+					}),
+				)
+			}),
 			rigidSpacer(4),
 			layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
 				return material.List(u.th, &u.logList).Layout(gtx, len(logs), func(gtx layout.Context, i int) layout.Dimensions {
@@ -259,6 +275,32 @@ func (u *ui) logPanel(gtx layout.Context) layout.Dimensions {
 }
 
 // ----- click handlers -----
+
+func (u *ui) handleCopyLogs(gtx layout.Context) {
+	snap := u.model.Snapshot()
+	logs := u.model.Logs()
+
+	var sb strings.Builder
+	sb.WriteString("=== SYSTEM INFO ===\n")
+	sb.WriteString(fmt.Sprintf("Time: %s\n", time.Now().Format(time.RFC3339)))
+	sb.WriteString(fmt.Sprintf("Phase: %s\n", snap.Phase))
+	sb.WriteString(fmt.Sprintf("OutputDir: %s\n", snap.OutputDir))
+	sb.WriteString("\n=== LOGS ===\n")
+	for _, l := range logs {
+		sb.WriteString(l)
+		sb.WriteString("\n")
+	}
+	sb.WriteString("\n=== FILES ===\n")
+	for _, f := range snap.Files {
+		sb.WriteString(fmt.Sprintf("[%s] %s (%d/%d bytes) %s\n", f.Status, f.RelPath, f.BytesGot, f.Size, f.Err))
+	}
+
+	gtx.Execute(clipboard.WriteCmd{
+		Type: "text/plain",
+		Data: io.NopCloser(strings.NewReader(sb.String())),
+	})
+	u.model.Logf("Logs copied to clipboard")
+}
 
 func (u *ui) startSignIn() {
 	snap := u.model.Snapshot()
