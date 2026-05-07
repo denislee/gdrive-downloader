@@ -30,6 +30,7 @@ type ui struct {
 
 	credEditor   widget.Editor
 	outDirEditor widget.Editor
+	deleteCheck  widget.Bool
 
 	signInBtn widget.Clickable
 	forgetBtn widget.Clickable
@@ -62,6 +63,7 @@ func newUI(w *app.Window, m *Model) *ui {
 	u.credEditor.SetText(m.CredentialsPath)
 	u.outDirEditor.SingleLine = true
 	u.outDirEditor.SetText(m.OutputDir)
+	u.deleteCheck.Value = m.DeleteAfterDownload
 	u.filesList.Axis = layout.Vertical
 	u.logList.Axis = layout.Vertical
 	return u
@@ -100,10 +102,12 @@ func (u *ui) layout(gtx layout.Context) layout.Dimensions {
 	out := strings.TrimSpace(u.outDirEditor.Text())
 
 	snap := u.model.Snapshot()
-	if cred != snap.CredentialsPath || out != snap.OutputDir {
+	del := u.deleteCheck.Value
+	if cred != snap.CredentialsPath || out != snap.OutputDir || del != snap.DeleteAfterDownload {
 		u.model.SetCredentials(cred)
 		u.model.SetOutputDir(out)
-		_ = SaveConfig(Config{CredentialsPath: cred, OutputDir: out})
+		u.model.SetDeleteAfterDownload(del)
+		_ = SaveConfig(Config{CredentialsPath: cred, OutputDir: out, DeleteAfterDownload: del})
 	}
 
 	// Click handling.
@@ -189,6 +193,8 @@ func (u *ui) outputRow(gtx layout.Context) layout.Dimensions {
 			layout.Flexed(1, func(gtx layout.Context) layout.Dimensions {
 				return material.Editor(u.th, &u.outDirEditor, "/path/to/destination").Layout(gtx)
 			}),
+			rigidSpacerW(16),
+			layout.Rigid(material.CheckBox(u.th, &u.deleteCheck, "Delete from Drive after verified download").Layout),
 		)
 	})
 }

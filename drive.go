@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"crypto/md5"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -296,6 +298,14 @@ func (d *Driver) handleOne(ctx context.Context, outputDir string, f *FileItem) {
 		return
 	}
 
+	snap := d.model.Snapshot()
+	if snap.DeleteAfterDownload {
+		if err := d.verifyAndDelete(f, dest); err != nil {
+			d.model.Logf("VERIFY/DELETE FAILED %s: %s", f.Name, err)
+			// We don't mark as failed because the download itself was successful.
+		}
+	}
+
 	d.state.Mark(f.ID, StateEntry{
 		Path:         f.RelPath,
 		MD5:          f.MD5,
@@ -305,6 +315,42 @@ func (d *Driver) handleOne(ctx context.Context, outputDir string, f *FileItem) {
 	d.model.UpdateFile(f.ID, func(fi *FileItem) {
 		fi.Status = StatusDone
 	})
+}
+
+func (d *Driver) verifyAndDelete(f *FileItem, localPath string) error {
+	// Verify size.
+	st, err := os.Stat(localPath)
+	if err != nil {
+		return fmt.Errorf("stat: %w", err)
+	}
+	if !f.IsExport && st.Size() != f.Size {
+		return fmt.Errorf("size mismatch: drive %d, local %d", f.Size, st.Size())
+	}
+
+	// Verify MD5 (only for non-exports, Google doesn't provide MD5 for exports).
+	if !f.IsExport && f.MD5 != "" {
+		hash := md5.New()
+		fh, err := os.Open(localPath)
+		if err != nil {
+			return fmt.Errorf("open: %w", err)
+		}
+		defer fh.Close()
+		if _, err := io.Copy(hash, fh); err != nil {
+			return fmt.Errorf("hash: %w", err)
+		}
+		localMD5 := hex.EncodeToString(hash.Sum(nil))
+		if localMD5 != f.MD5 {
+			return fmt.Errorf("MD5 mismatch: drive %s, local %s", f.MD5, localMD5)
+		}
+	}
+
+	// Delete from Google Drive.
+	d.model.Logf("VERIFIED %s, deleting from Drive...", f.Name)
+	if err := d.svc.Files.Delete(f.ID).Do(); err != nil {
+		return fmt.Errorf("delete: %w", err)
+	}
+	d.model.Logf("DELETED %s from Drive", f.Name)
+	return nil
 }
 
 func (d *Driver) downloadSequential(ctx context.Context, f *FileItem, tmp string, offset int64) error {

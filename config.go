@@ -11,6 +11,7 @@ const configFileName = "config.json"
 type Config struct {
 	CredentialsPath string `json:"credentialsPath"`
 	OutputDir       string `json:"outputDir"`
+	DeleteAfterDownload bool `json:"deleteAfterDownload"`
 }
 
 func configPath() (string, error) {

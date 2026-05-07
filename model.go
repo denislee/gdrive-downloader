@@ -85,6 +85,7 @@ type Model struct {
 
 	CredentialsPath string
 	OutputDir       string
+	DeleteAfterDownload bool
 	SignedIn        bool
 	UserEmail       string
 
@@ -179,6 +180,13 @@ func (m *Model) SetOutputDir(p string) {
 	m.notify()
 }
 
+func (m *Model) SetDeleteAfterDownload(b bool) {
+	m.mu.Lock()
+	m.DeleteAfterDownload = b
+	m.mu.Unlock()
+	m.notify()
+}
+
 func (m *Model) ResetFiles(files []*FileItem) {
 	m.mu.Lock()
 	m.Files = files
@@ -251,6 +259,7 @@ func (m *Model) Snapshot() ModelSnapshot {
 	return ModelSnapshot{
 		CredentialsPath: m.CredentialsPath,
 		OutputDir:       m.OutputDir,
+		DeleteAfterDownload: m.DeleteAfterDownload,
 		SignedIn:        m.SignedIn,
 		UserEmail:       m.UserEmail,
 		Phase:           m.Phase,
@@ -267,6 +276,7 @@ func (m *Model) Snapshot() ModelSnapshot {
 type ModelSnapshot struct {
 	CredentialsPath string
 	OutputDir       string
+	DeleteAfterDownload bool
 	SignedIn        bool
 	UserEmail       string
 	Phase           Phase

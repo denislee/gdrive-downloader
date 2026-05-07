@@ -14,6 +14,7 @@ func main() {
 	if cfg, err := LoadConfig(); err == nil {
 		model.SetCredentials(cfg.CredentialsPath)
 		model.SetOutputDir(cfg.OutputDir)
+		model.SetDeleteAfterDownload(cfg.DeleteAfterDownload)
 	}
 	go func() {
 		w := new(app.Window)
