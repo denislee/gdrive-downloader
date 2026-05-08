@@ -265,15 +265,25 @@ func (d *Driver) handleOne(ctx context.Context, outputDir string, f *FileItem) {
 	if _, err := os.Stat(dest); err == nil {
 		if err := d.verifyLocalFile(f, dest); err == nil {
 			if d.model.IsDeleteAfterDownload() {
-				d.model.Logf("RE-VERIFIED %s, deleting from Drive...", f.Name)
-				if err := d.svc.Files.Delete(f.ID).Context(ctx).Do(); err != nil {
+				d.model.Logf("RE-VERIFIED %s, removing from Drive...", f.Name)
+				var err error
+				if d.model.IsTrashInsteadOfDelete() {
+					_, err = d.svc.Files.Update(f.ID, &drive.File{Trashed: true}).Context(ctx).Do()
+				} else {
+					err = d.svc.Files.Delete(f.ID).Context(ctx).Do()
+				}
+				if err != nil {
 					if isInsufficientScope(err) {
-						d.model.Logf("DELETE FAILED %s: insufficient permissions. Please click 'Forget' and 'Sign in' again to refresh scopes.", f.Name)
+						d.model.Logf("REMOVE FAILED %s: insufficient permissions. Try checking 'Trash' instead of 'Delete' or verify file ownership.", f.Name)
 					} else {
-						d.model.Logf("DELETE FAILED %s: %s", f.Name, err)
+						d.model.Logf("REMOVE FAILED %s: %s", f.Name, err)
 					}
 				} else {
-					d.model.Logf("DELETED %s from Drive", f.Name)
+					verb := "DELETED"
+					if d.model.IsTrashInsteadOfDelete() {
+						verb = "TRASHED"
+					}
+					d.model.Logf("%s %s from Drive", verb, f.Name)
 				}
 			}
 			d.markSkipped(f, "already exists and verified")
@@ -330,15 +340,25 @@ func (d *Driver) handleOne(ctx context.Context, outputDir string, f *FileItem) {
 		if err := d.verifyLocalFile(f, dest); err != nil {
 			d.model.Logf("VERIFY FAILED %s: %s", f.Name, err)
 		} else {
-			d.model.Logf("VERIFIED %s, deleting from Drive...", f.Name)
-			if err := d.svc.Files.Delete(f.ID).Context(ctx).Do(); err != nil {
+			d.model.Logf("VERIFIED %s, removing from Drive...", f.Name)
+			var err error
+			if d.model.IsTrashInsteadOfDelete() {
+				_, err = d.svc.Files.Update(f.ID, &drive.File{Trashed: true}).Context(ctx).Do()
+			} else {
+				err = d.svc.Files.Delete(f.ID).Context(ctx).Do()
+			}
+			if err != nil {
 				if isInsufficientScope(err) {
-					d.model.Logf("DELETE FAILED %s: insufficient permissions. Please click 'Forget' and 'Sign in' again to refresh scopes.", f.Name)
+					d.model.Logf("REMOVE FAILED %s: insufficient permissions. Try checking 'Trash' instead of 'Delete' or verify file ownership.", f.Name)
 				} else {
-					d.model.Logf("DELETE FAILED %s: %s", f.Name, err)
+					d.model.Logf("REMOVE FAILED %s: %s", f.Name, err)
 				}
 			} else {
-				d.model.Logf("DELETED %s from Drive", f.Name)
+				verb := "DELETED"
+				if d.model.IsTrashInsteadOfDelete() {
+					verb = "TRASHED"
+				}
+				d.model.Logf("%s %s from Drive", verb, f.Name)
 			}
 		}
 	}

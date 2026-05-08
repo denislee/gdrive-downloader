@@ -12,6 +12,7 @@ type Config struct {
 	CredentialsPath string `json:"credentialsPath"`
 	OutputDir       string `json:"outputDir"`
 	DeleteAfterDownload bool `json:"deleteAfterDownload"`
+	TrashInsteadOfDelete bool `json:"trashInsteadOfDelete"`
 }
 
 func configPath() (string, error) {
