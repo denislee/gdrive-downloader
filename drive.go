@@ -574,7 +574,13 @@ func (d *Driver) markFailed(f *FileItem, err error) {
 func isInsufficientScope(err error) bool {
 	var ge *googleapi.Error
 	if errors.As(err, &ge) {
-		return ge.Code == 403 && (strings.Contains(ge.Message, "insufficient permissions") || strings.Contains(ge.Error(), "ACCESS_TOKEN_SCOPE_INSUFFICIENT"))
+		if ge.Code != 403 {
+			return false
+		}
+		msg := strings.ToLower(ge.Error())
+		return strings.Contains(msg, "insufficient") ||
+			strings.Contains(msg, "permission") ||
+			strings.Contains(msg, "scope")
 	}
 	return false
 }
